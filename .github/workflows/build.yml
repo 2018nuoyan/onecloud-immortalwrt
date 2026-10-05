@@ -1,17 +1,17 @@
-name: Build ImmortalWrt OneCloud
+name: 构建玩客云 ImmortalWrt 固件、ImageBuilder 和 SDK
 
 on:
   schedule:
-    # 02:00 UTC on the 1st of every month
+    # 每月 1 日 UTC 02:00（北京时间 10:00）自动构建
     - cron: "0 2 1 * *"
   workflow_dispatch:
     inputs:
       lan_ip:
-        description: "Default LAN IP"
+        description: "默认 LAN IP 地址"
         required: false
         default: "10.10.10.1"
       use_ccache:
-        description: "Use ccache"
+        description: "启用 ccache 编译缓存"
         required: false
         default: true
         type: boolean
@@ -35,10 +35,10 @@ jobs:
     timeout-minutes: 420
 
     steps:
-      - name: Checkout
+      - name: 检出项目代码
         uses: actions/checkout@v4
 
-      - name: Free disk space and install build deps
+      - name: 清理磁盘空间并安装编译依赖
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -61,18 +61,18 @@ jobs:
           sudo chown "$USER:$USER" /workdir
           df -hT
 
-      - name: Clone ImmortalWrt ${{ env.REPO_TAG }}
+      - name: 克隆 ImmortalWrt ${{ env.REPO_TAG }} 源码
         working-directory: /workdir
         run: |
           git clone --depth=1 --single-branch --branch "${REPO_TAG}" "${REPO_URL}" openwrt
           [ "$(git -C openwrt rev-parse HEAD)" = "${REPO_COMMIT}" ] || {
-            echo "::error::release tag does not match the expected commit"; exit 1; }
+            echo "::error::发布标签对应的提交与预期不一致"; exit 1; }
           ln -sfn /workdir/openwrt "${GITHUB_WORKSPACE}/openwrt"
           echo "OPENWRT_SHA=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "OPENWRT_VERSION=${REPO_TAG}" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=immortalwrt-25.12.2-$(date +%Y.%m.%d)" >> "$GITHUB_ENV"
 
-      - name: Cache ccache and downloads
+      - name: 缓存编译缓存和已下载源码
         uses: actions/cache@v4
         with:
           path: |
@@ -82,7 +82,7 @@ jobs:
           restore-keys: |
             onecloud-immortalwrt-${{ env.REPO_TAG }}-
 
-      - name: Inject target and custom files
+      - name: 注入设备支持和自定义文件
         run: |
           cp -a target openwrt/
           mkdir -p openwrt/files
@@ -96,13 +96,13 @@ jobs:
           cd openwrt
           "${GITHUB_WORKSPACE}/scripts/diy-part1.sh"
 
-      - name: Update and install feeds
+      - name: 更新并安装软件包源
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Apply customisations and generate .config
+      - name: 应用自定义设置并生成编译配置
         run: |
           cd openwrt
           cp "${GITHUB_WORKSPACE}/config/onecloud.config" .config
@@ -110,22 +110,21 @@ jobs:
           ./scripts/feeds install -a
           make defconfig
 
-      - name: Verify every requested package survived defconfig
+      - name: 检查软件包、设备和构建工具配置
         run: |
           cd openwrt
           "${GITHUB_WORKSPACE}/scripts/verify-config.sh"
 
-      - name: Download sources
+      - name: 下载编译所需源码
         run: |
           cd openwrt
           make download -j8
-          # Drop failed downloads. Only top-level files: dl/ also holds the
-          # extracted go-mod-cache tree, and plenty of legitimate .go files in
-          # there are under 1 KiB. Pruning those corrupts the module cache and
-          # breaks every Go package on the next cached run.
+          # 清理不足 1 KiB 的顶层下载文件，不递归处理 dl/ 子目录。
+          # dl/ 还保存解压后的 go-mod-cache，其中许多正常 .go 文件不足 1 KiB。
+          # 递归删除会损坏 Go 模块缓存，导致后续使用缓存编译 Go 软件包失败。
           find dl -maxdepth 1 -type f -size -1024c -print -delete
 
-      - name: Compile
+      - name: 编译固件、独立 ImageBuilder 和 ImmortalWrt SDK
         id: compile
         run: |
           cd openwrt
@@ -134,17 +133,17 @@ jobs:
           df -hT
           ls -lh bin/targets/amlogic/meson8b/
 
-      - name: Pack Amlogic USB Burning Tool image
+      - name: 打包晶晨 USB Burning Tool 线刷镜像
         run: |
           set -eo pipefail
           cd openwrt/bin/targets/amlogic/meson8b
           gz=$(ls ./*-sysupgrade.img.gz | head -1)
           prefix="${gz%-sysupgrade.img.gz}"
 
-          # append-metadata leaves fwtool data after the gzip stream; gzip
-          # reports that as trailing garbage, which is expected here.
+          # append-metadata 会在 gzip 数据流尾部附加 fwtool 元数据。
+          # gzip 因此可能提示尾部存在额外数据，这是此处的预期情况。
           gzip -dc "$gz" > disk.img 2>/dev/null || true
-          [ -s disk.img ] || { echo "failed to decompress $gz"; exit 1; }
+          [ -s disk.img ] || { echo "解压镜像失败：$gz"; exit 1; }
 
           curl -fsSL -o AmlImg \
             "https://github.com/hzyitc/AmlImg/releases/download/${AMLIMG_VERSION}/AmlImg_${AMLIMG_VERSION}_linux_amd64"
@@ -165,7 +164,7 @@ jobs:
           rm -rf burn AmlImg uboot.burn.img disk.img
           ls -lh
 
-      - name: Collect release files
+      - name: 收集固件、构建工具和校验文件
         run: |
           mkdir -p /tmp/fw
           cd openwrt/bin/targets/amlogic/meson8b
@@ -180,36 +179,47 @@ jobs:
             "$(git -C ../../../.. rev-parse HEAD)" > /tmp/fw/source-version.txt
           cd /tmp/fw && sha256sum ./* > sha256sums && ls -lh
 
-      - name: Upload artifact
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: onecloud-immortalwrt-${{ env.RELEASE_TAG }}
           path: /tmp/fw
           if-no-files-found: error
 
-      - name: Publish release
+      - name: 发布固件和构建工具
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: OneCloud ImmortalWrt ${{ env.RELEASE_TAG }}
+          name: 玩客云 ImmortalWrt ${{ env.RELEASE_TAG }}
           files: /tmp/fw/*
           make_latest: true
           body: |
-            ImmortalWrt `${{ env.OPENWRT_VERSION }}` (`${{ env.OPENWRT_SHA }}`) for Thunder OneCloud (Amlogic S805).
+            适用于玩客云（Thunder OneCloud，Amlogic S805）的 ImmortalWrt `${{ env.OPENWRT_VERSION }}`，源码提交：`${{ env.OPENWRT_SHA }}`。
 
-            Matching standalone ImageBuilder and SDK are included. Extract `onecloud-files.tar.gz` and pass its `files/` directory to ImageBuilder with `FILES=` to retain device defaults.
+            本次发布包含固件及与其匹配的独立 ImageBuilder 和 ImmortalWrt SDK。
 
-            | | |
+            | 产物 | 用途 |
             | --- | --- |
-            | LAN | `${{ env.LAN_IP }}` |
-            | login | `root` / `password` |
-            | timezone | `Asia/Tokyo` |
+            | `*-sysupgrade.img.gz` | 系统升级镜像 |
+            | `*-emmc.burn.img.xz` | 首次刷机或救砖的线刷镜像 |
+            | `*-imagebuilder-*.tar.zst` | 独立 ImageBuilder，使用已编译软件包重组固件 |
+            | `*-sdk-*.tar.zst` | ImmortalWrt SDK，编译匹配此目标的软件包 |
+            | `onecloud-files.tar.gz` | 设备默认配置文件 |
+            | `sha256sums` | 下载文件的 SHA-256 校验值 |
 
-            **First flash / recovery** — `*-emmc.burn.img.xz`, unpack and write with the Amlogic USB Burning Tool.
+            | 默认设置 | 值 |
+            | --- | --- |
+            | LAN 地址 | `${{ env.LAN_IP }}` |
+            | 用户名 / 密码 | `root` / `password`（请及时修改） |
+            | 时区 | `Asia/Tokyo` |
 
-            **Updating** — `*-sysupgrade.img.gz` through LuCI → System → Backup / Flash Firmware, or `sysupgrade`. Only the boot and root partitions are written; u-boot is left alone.
+            **首次刷机 / 救砖**：解压 `*-emmc.burn.img.xz`，使用晶晨 USB Burning Tool 写入。
 
-      - name: Prune old releases
+            **系统升级**：在 LuCI → 系统 → 备份/升级中上传 `*-sysupgrade.img.gz`，或使用 `sysupgrade` 命令。仅写入引导分区和根分区，不改动 u-boot。
+
+            **ImageBuilder**：解压 `onecloud-files.tar.gz`，通过 `FILES=` 指定其中的 `files/` 目录，以保留设备默认设置。
+
+      - name: 清理旧版本（保留最近 6 次发布）
         uses: dev-drprasad/delete-older-releases@v0.3.4
         continue-on-error: true
         with:

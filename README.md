@@ -87,7 +87,7 @@ Docker 数据默认放在根分区，升级时会被覆盖。经常用 Docker �
 
 ## 自己编译
 
-Actions → **Build ImmortalWrt OneCloud** → Run workflow，可以改 LAN IP。
+Actions → **构建玩客云 ImmortalWrt 固件、ImageBuilder 和 SDK** → Run workflow，可以改 LAN IP。
 
 本地编译（Linux x86_64，建议空闲磁盘 80G 以上，需安装 OpenWrt 编译依赖）：
 
