@@ -1,0 +1,205 @@
+name: 构建玩客云 ImageBuilder 和 ImmortalWrt SDK
+
+on:
+  schedule:
+    # 每月 1 日 UTC 02:00（北京时间 10:00）自动构建。
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+    inputs:
+      lan_ip:
+        description: "默认 LAN IP 地址（与目标固件保持一致）"
+        required: false
+        default: "10.10.10.1"
+      use_ccache:
+        description: "启用 ccache 编译缓存"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  TZ: Etc/UTC
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_TAG: v25.12.2
+  REPO_COMMIT: 4fc16f2985a358bd43bb522e43f05395fcbd6ed5
+  LAN_IP: ${{ inputs.lan_ip || '10.10.10.1' }}
+  USE_CCACHE: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.use_ccache && 'true' || 'false') }}
+
+jobs:
+  build-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 420
+
+    steps:
+      - name: 检出项目代码
+        uses: actions/checkout@v4
+
+      - name: 清理磁盘空间并安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo docker system prune -af || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/share/swift /usr/share/miniconda \
+            /opt/microsoft /usr/local/share/powershell /usr/local/lib/node_modules || true
+          sudo apt-get -y update
+          sudo apt-get -y install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev \
+            file wget ccache device-tree-compiler libelf-dev dosfstools mtools zstd
+          sudo apt-get -y autoremove --purge
+          sudo apt-get clean
+          sudo timedatectl set-timezone "${TZ}"
+          sudo mkdir -p /workdir
+          sudo chown "$USER:$USER" /workdir
+          df -hT
+
+      - name: 克隆 ImmortalWrt ${{ env.REPO_TAG }} 源码
+        working-directory: /workdir
+        run: |
+          git clone --depth=1 --single-branch --branch "${REPO_TAG}" "${REPO_URL}" openwrt
+          [ "$(git -C openwrt rev-parse HEAD)" = "${REPO_COMMIT}" ] || {
+            echo "::error::发布标签对应的提交与预期不一致"; exit 1; }
+          ln -sfn /workdir/openwrt "${GITHUB_WORKSPACE}/openwrt"
+          echo "OPENWRT_SHA=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "OPENWRT_VERSION=${REPO_TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=tools-immortalwrt-25.12.2-$(date +%Y.%m.%d)-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: 缓存编译缓存和已下载源码
+        uses: actions/cache@v4
+        with:
+          path: |
+            /workdir/openwrt/.ccache
+            /workdir/openwrt/dl
+          key: onecloud-immortalwrt-${{ env.REPO_TAG }}-${{ hashFiles('config/onecloud.config') }}
+          restore-keys: |
+            onecloud-immortalwrt-${{ env.REPO_TAG }}-
+
+      - name: 注入设备支持和自定义文件
+        run: |
+          cp -a target openwrt/
+          mkdir -p openwrt/files
+          cp -a files/. openwrt/files/
+          chmod +x scripts/*.sh \
+            openwrt/files/usr/sbin/onecloud-install-emmc \
+            openwrt/files/etc/uci-defaults/* \
+            openwrt/target/linux/amlogic/image/*.sh \
+            openwrt/target/linux/amlogic/base-files/etc/board.d/* \
+            openwrt/target/linux/amlogic/base-files/etc/uci-defaults/*
+          cd openwrt
+          "${GITHUB_WORKSPACE}/scripts/diy-part1.sh"
+
+      - name: 更新并安装软件包源
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用自定义设置并启用构建工具
+        run: |
+          cd openwrt
+          cp "${GITHUB_WORKSPACE}/config/onecloud.config" .config
+          "${GITHUB_WORKSPACE}/scripts/diy-part2.sh" "${LAN_IP}" "${USE_CCACHE}"
+          ./scripts/feeds install -a
+          sed -i '/^CONFIG_IB=/d; /^CONFIG_IB_STANDALONE=/d; /^CONFIG_SDK=/d' .config
+          printf 'CONFIG_IB=y\nCONFIG_IB_STANDALONE=y\nCONFIG_SDK=y\n' >> .config
+          make defconfig
+          "${GITHUB_WORKSPACE}/scripts/verify-config.sh" tools
+
+      - name: 下载编译所需源码
+        run: |
+          cd openwrt
+          make download -j8 || make download -j1 V=s
+
+      - name: 编译工具链、内核和配套软件包
+        run: |
+          cd openwrt
+          # 独立 ImageBuilder 需要完整的本地软件包仓库和预编译内核。
+          # 不运行默认 world 目标，避免直接生成最终固件镜像。
+          build_stage() {
+            make -j"$(nproc)" "$@" || make -j1 V=s "$@"
+          }
+          build_stage tools/install
+          build_stage toolchain/install
+          build_stage target/compile
+          build_stage package/compile
+          build_stage package/install
+          build_stage package/index
+
+      - name: 生成独立 ImageBuilder 和 ImmortalWrt SDK
+        run: |
+          cd openwrt
+          # target/install 会准备最终内核，并按 CONFIG_IB / CONFIG_SDK 打包工具。
+          # 仅在本次 make 调用中清空镜像文件系统列表，跳过所有根文件系统镜像。
+          # 不修改 .config，确保 ImageBuilder 仍保留 ext4 镜像生成能力。
+          make -j"$(nproc)" target/install TARGET_FILESYSTEMS= \
+            CONFIG_TARGET_ROOTFS_TARGZ= CONFIG_TARGET_ROOTFS_CPIOGZ= || \
+            make -j1 V=s target/install TARGET_FILESYSTEMS= \
+              CONFIG_TARGET_ROOTFS_TARGZ= CONFIG_TARGET_ROOTFS_CPIOGZ=
+          ls -lh bin/targets/amlogic/meson8b/
+          df -hT
+
+      - name: 验证工具包完整性且未生成固件镜像
+        run: |
+          cd openwrt/bin/targets/amlogic/meson8b
+          shopt -s nullglob
+          builders=( ./*-imagebuilder-*.tar.zst )
+          sdks=( ./*-sdk-*.tar.zst )
+          firmware=( ./*-sysupgrade.img* ./*-emmc.burn.img* )
+          [ "${#builders[@]}" -eq 1 ] && [ "${#sdks[@]}" -eq 1 ] || {
+            echo "::error::ImageBuilder 或 SDK 产物缺失或数量异常"; exit 1; }
+          [ "${#firmware[@]}" -eq 0 ] || {
+            echo "::error::工具流程不应生成固件镜像"; exit 1; }
+          zstd -t "${builders[@]}" "${sdks[@]}"
+
+      - name: 收集构建工具、设备配置和校验文件
+        run: |
+          mkdir -p /tmp/tools
+          cd openwrt/bin/targets/amlogic/meson8b
+          cp ./*-imagebuilder-*.tar.zst ./*-sdk-*.tar.zst /tmp/tools/
+          cp ../../../../.config /tmp/tools/build.config
+          cp ../../../../feeds.conf.default /tmp/tools/feeds.conf.default
+          cp "${GITHUB_WORKSPACE}/config/onecloud.config" /tmp/tools/onecloud.config
+          tar -czf /tmp/tools/onecloud-files.tar.gz -C "${GITHUB_WORKSPACE}" files
+          printf 'source=%s\ntag=%s\ncommit=%s\nproject_commit=%s\n' \
+            "${REPO_URL}" "${OPENWRT_VERSION}" \
+            "$(git -C ../../../.. rev-parse HEAD)" \
+            "${GITHUB_SHA}" > /tmp/tools/source-version.txt
+          cd /tmp/tools && sha256sum ./* > sha256sums && ls -lh
+
+      - name: 上传 ImageBuilder 和 SDK 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: onecloud-build-tools-${{ env.RELEASE_TAG }}
+          path: /tmp/tools
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: 发布独立构建工具
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: 玩客云 ImageBuilder 和 ImmortalWrt SDK ${{ env.RELEASE_TAG }}
+          files: /tmp/tools/*
+          make_latest: false
+          body: |
+            适用于玩客云（Amlogic S805 / meson8b）的 ImmortalWrt `${{ env.OPENWRT_VERSION }}` 构建工具，源码提交：`${{ env.OPENWRT_SHA }}`。
+
+            本次发布仅包含构建工具及配套配置，不包含固件镜像。
+
+            | 产物 | 用途 |
+            | --- | --- |
+            | `*-imagebuilder-*.tar.zst` | 独立 ImageBuilder，包含本次编译的软件包 |
+            | `*-sdk-*.tar.zst` | ImmortalWrt SDK，编译此目标的软件包 |
+            | `onecloud-files.tar.gz` | ImageBuilder 使用的设备默认配置文件 |
+            | `build.config` | 本次完整编译配置 |
+            | `source-version.txt` | 上游源码和项目提交信息 |
+            | `sha256sums` | SHA-256 校验值 |
+
+            在 Linux x86_64 上使用。解压 `onecloud-files.tar.gz`，通过 `FILES=` 指定其中的 `files/` 目录。
+            ImageBuilder 使用 `PROFILE=thunder-onecloud`，通过 `PACKAGES=` 选择所需软件包。
+            固件与工具应使用相同的项目提交、内核配置和默认参数；不要混用其他版本或内核 ABI 的软件包。

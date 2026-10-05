@@ -4,7 +4,7 @@
 
 源码固定为 [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) 的 `v25.12.2` 正式发布版（提交 `4fc16f2985a358bd43bb522e43f05395fcbd6ed5`），保留该标签固定的 feeds。设备支持（设备树、6.12 内核补丁、镜像打包）由本仓库的 `target/linux/amlogic` 提供。
 
-每月 1 号自动云编译一次，产物发在 [Releases](../../releases)。构建同时生成匹配此固件的独立 ImageBuilder 和 SDK。
+固件和构建工具使用两条独立的 Actions 工作流，每月 1 号自动构建，分别发布到 [Releases](../../releases)。
 
 ## 下载哪个文件
 
@@ -87,7 +87,16 @@ Docker 数据默认放在根分区，升级时会被覆盖。经常用 Docker �
 
 ## 自己编译
 
-Actions → **构建玩客云 ImmortalWrt 固件、ImageBuilder 和 SDK** → Run workflow，可以改 LAN IP。
+在 Actions 中选择工作流 → Run workflow，可以改 LAN IP：
+
+| 工作流文件 | 名称 | 产物 |
+| --- | --- | --- |
+| `.github/workflows/build.yml` | 构建玩客云 ImmortalWrt 固件 | sysupgrade 升级镜像、burn 线刷镜像 |
+| `.github/workflows/build-tools.yml` | 构建玩客云 ImageBuilder 和 ImmortalWrt SDK | 独立 ImageBuilder、SDK、设备默认配置 |
+
+固件流程禁用 `CONFIG_IB` 和 `CONFIG_SDK`；工具流程启用两者并包含本地软件包仓库。工具流程仍需编译工具链、内核和软件包，但只打包工具，不生成 sysupgrade 或 burn 镜像。两条流程使用相同源码、feeds 和软件包配置；匹配固件时请使用同一项目提交和相同的输入参数。
+
+工具 Release 使用 `tools-` 标签前缀，不会覆盖最新固件或被固件清理步骤删除。本地构建脚本仍默认生成固件、ImageBuilder 和 SDK。
 
 本地编译（Linux x86_64，建议空闲磁盘 80G 以上，需安装 OpenWrt 编译依赖）：
 

@@ -1,4 +1,4 @@
-name: 构建玩客云 ImmortalWrt 固件、ImageBuilder 和 SDK
+name: 构建玩客云 ImmortalWrt 固件
 
 on:
   schedule:
@@ -70,7 +70,7 @@ jobs:
           ln -sfn /workdir/openwrt "${GITHUB_WORKSPACE}/openwrt"
           echo "OPENWRT_SHA=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_ENV"
           echo "OPENWRT_VERSION=${REPO_TAG}" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=immortalwrt-25.12.2-$(date +%Y.%m.%d)" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=immortalwrt-25.12.2-$(date +%Y.%m.%d)-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
       - name: 缓存编译缓存和已下载源码
         uses: actions/cache@v4
@@ -108,12 +108,15 @@ jobs:
           cp "${GITHUB_WORKSPACE}/config/onecloud.config" .config
           "${GITHUB_WORKSPACE}/scripts/diy-part2.sh" "${LAN_IP}" "${USE_CCACHE}"
           ./scripts/feeds install -a
+          # 固件流程禁用工具包打包，保留相同的软件包和内核配置。
+          sed -i '/^CONFIG_IB=/d; /^CONFIG_IB_STANDALONE=/d; /^CONFIG_SDK=/d' .config
+          printf '# CONFIG_IB is not set\n# CONFIG_IB_STANDALONE is not set\n# CONFIG_SDK is not set\n' >> .config
           make defconfig
 
-      - name: 检查软件包、设备和构建工具配置
+      - name: 检查软件包、设备和纯固件构建配置
         run: |
           cd openwrt
-          "${GITHUB_WORKSPACE}/scripts/verify-config.sh"
+          "${GITHUB_WORKSPACE}/scripts/verify-config.sh" firmware
 
       - name: 下载编译所需源码
         run: |
@@ -124,7 +127,7 @@ jobs:
           # 递归删除会损坏 Go 模块缓存，导致后续使用缓存编译 Go 软件包失败。
           find dl -maxdepth 1 -type f -size -1024c -print -delete
 
-      - name: 编译固件、独立 ImageBuilder 和 ImmortalWrt SDK
+      - name: 编译固件
         id: compile
         run: |
           cd openwrt
@@ -164,16 +167,14 @@ jobs:
           rm -rf burn AmlImg uboot.burn.img disk.img
           ls -lh
 
-      - name: 收集固件、构建工具和校验文件
+      - name: 收集固件和校验文件
         run: |
           mkdir -p /tmp/fw
           cd openwrt/bin/targets/amlogic/meson8b
           cp ./*-sysupgrade.img.gz ./*-emmc.burn.img.xz /tmp/fw/
-          cp ./*-imagebuilder-*.tar.zst ./*-sdk-*.tar.zst /tmp/fw/
           cp ../../../../.config /tmp/fw/build.config
           cp ../../../../feeds.conf.default /tmp/fw/feeds.conf.default
           cp "${GITHUB_WORKSPACE}/config/onecloud.config" /tmp/fw/onecloud.config
-          tar -czf /tmp/fw/onecloud-files.tar.gz -C "${GITHUB_WORKSPACE}" files
           printf 'source=%s\ntag=%s\ncommit=%s\n' \
             "${REPO_URL}" "${OPENWRT_VERSION}" \
             "$(git -C ../../../.. rev-parse HEAD)" > /tmp/fw/source-version.txt
@@ -186,7 +187,7 @@ jobs:
           path: /tmp/fw
           if-no-files-found: error
 
-      - name: 发布固件和构建工具
+      - name: 发布固件
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
@@ -196,15 +197,12 @@ jobs:
           body: |
             适用于玩客云（Thunder OneCloud，Amlogic S805）的 ImmortalWrt `${{ env.OPENWRT_VERSION }}`，源码提交：`${{ env.OPENWRT_SHA }}`。
 
-            本次发布包含固件及与其匹配的独立 ImageBuilder 和 ImmortalWrt SDK。
+            本次发布仅包含固件。ImageBuilder 和 ImmortalWrt SDK 请使用独立的构建工具工作流生成。
 
             | 产物 | 用途 |
             | --- | --- |
             | `*-sysupgrade.img.gz` | 系统升级镜像 |
             | `*-emmc.burn.img.xz` | 首次刷机或救砖的线刷镜像 |
-            | `*-imagebuilder-*.tar.zst` | 独立 ImageBuilder，使用已编译软件包重组固件 |
-            | `*-sdk-*.tar.zst` | ImmortalWrt SDK，编译匹配此目标的软件包 |
-            | `onecloud-files.tar.gz` | 设备默认配置文件 |
             | `sha256sums` | 下载文件的 SHA-256 校验值 |
 
             | 默认设置 | 值 |
@@ -217,13 +215,16 @@ jobs:
 
             **系统升级**：在 LuCI → 系统 → 备份/升级中上传 `*-sysupgrade.img.gz`，或使用 `sysupgrade` 命令。仅写入引导分区和根分区，不改动 u-boot。
 
-            **ImageBuilder**：解压 `onecloud-files.tar.gz`，通过 `FILES=` 指定其中的 `files/` 目录，以保留设备默认设置。
-
-      - name: 清理旧版本（保留最近 6 次发布）
-        uses: dev-drprasad/delete-older-releases@v0.3.4
+      - name: 清理旧固件版本（保留最近 6 次固件发布）
         continue-on-error: true
-        with:
-          keep_latest: 6
-          delete_tags: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 仅清理固件发布，不删除独立工具流程的 Release。
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("immortalwrt-25.12.2-"))] | sort_by(.createdAt) | reverse | .[6:][] | .tagName' \
+            > /tmp/old-firmware-tags
+          while IFS= read -r tag; do
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          done < /tmp/old-firmware-tags
