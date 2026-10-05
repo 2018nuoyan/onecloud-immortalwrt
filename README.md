@@ -87,16 +87,22 @@ Docker 数据默认放在根分区，升级时会被覆盖。经常用 Docker �
 
 ## 自己编译
 
-在 Actions 中选择工作流 → Run workflow，可以改 LAN IP：
+在 Actions 中选择工作流 → Run workflow。固件流程可以改 LAN IP；工具流程可以选择 runner：
 
 | 工作流文件 | 名称 | 产物 |
 | --- | --- | --- |
 | `.github/workflows/build.yml` | 构建玩客云 ImmortalWrt 固件 | sysupgrade 升级镜像、burn 线刷镜像 |
 | `.github/workflows/build-tools.yml` | 构建玩客云 ImageBuilder 和 ImmortalWrt SDK | 仅独立 ImageBuilder 和 SDK 两个压缩包 |
 
-固件流程禁用 `CONFIG_IB` 和 `CONFIG_SDK`。工具流程使用精简的 `config/onecloud-tools.config`，仅保留目标默认软件包、必要设备支持和工具包选项，不注入 `files/`，不执行定制脚本，不修改网络和密码。独立 ImageBuilder 包含本次编译的目标默认软件包。工具流程仍需编译工具链、内核和默认软件包，但不生成 sysupgrade 或 burn 镜像。
+固件流程禁用 `CONFIG_IB` 和 `CONFIG_SDK`。工具流程使用 `config/onecloud-tools.config`，启用 `CONFIG_ALL`、`CONFIG_ALL_KMODS` 和 `CONFIG_ALL_NONSHARED`，编译 ImmortalWrt 25.12.2 固定 feeds 中所有对此 ARM 32 位目标可选的软件包和内核模块，排除 BROKEN 及架构不兼容的包。附加包以 `m` 编译后收入独立 ImageBuilder 仓库，不会全部安装进根文件系统；通过 `PACKAGES=` 按需选装。
 
-两条流程使用相同上游版本和 feeds，但软件包及内核配置不同，内核 ABI 可能不一致；不要把精简工具流程的内核模块直接安装到完整定制固件中。
+工具流程保留必要设备支持，不注入 `files/`，不执行定制脚本，不修改网络和密码，也不生成 sysupgrade 或 burn 镜像。发布前会核对所有已编译包都已收入 ImageBuilder，任一编译失败均终止发布，不会静默跳过。
+
+两条流程使用相同上游版本和 feeds，但软件包及内核配置不同，内核 ABI 可能不一致；不要把全量工具流程的内核模块直接安装到定制固件中。
+
+全量 feeds 编译资源需求很高，建议自托管 Linux x64 runner（可用磁盘至少 150 GiB，建议 200 GiB 以上，内存 16 GiB 以上），手动运行时选择 `self-hosted`；可设置仓库变量 `TOOLS_RUNNER=self-hosted` 供定时流程使用。自托管 runner 需能安装编译依赖，超时为 24 小时；默认 GitHub 托管 runner 的超时为 6 小时，不保证能完成全量编译。构建目录使用独立的 runner 临时目录，不清理自托管服务器的其他项目。
+
+始终只上传两个工具包。若任一压缩包达到 GitHub Release 单附件 2 GiB 限制，则保留 Actions Artifacts 下载，跳过 Release 上传。
 
 工具 Release 使用 `tools-` 标签前缀，不会覆盖最新固件或被固件清理步骤删除。本地构建脚本仍默认生成固件、ImageBuilder 和 SDK。
 
@@ -115,7 +121,7 @@ JOBS=8 bash scripts/build-local.sh 10.10.10.1 true 2>&1 | tee build.log
 
 ### ImageBuilder 与 SDK
 
-- `immortalwrt-imagebuilder-*.tar.zst`：重组固件，包含目标默认软件包，不编译新包或内核。
+- `immortalwrt-imagebuilder-*.tar.zst`：重组固件，包含本次全部已编译的兼容插件及内核模块，不编译新包或内核。
 - `immortalwrt-sdk-*.tar.zst`：编译此目标的软件包，不是完整固件源码。
 
 在 Linux x86_64 上解压 ImageBuilder，进入其目录：
@@ -125,7 +131,7 @@ make info
 make image PROFILE=thunder-onecloud
 ```
 
-如需自定义文件，可自行通过 `FILES=/absolute/path/to/files` 指定目录。精简 ImageBuilder 不包含完整定制固件的 Docker、HomeProxy 等附加包；需要其他包时应先编译并提供兼容的软件包仓库，再使用 `PACKAGES=` 选择。它生成 `sysupgrade.img.gz`，不直接生成 burn 包。不要混用官方 OpenWrt、其他 ImmortalWrt 版本或不同内核 ABI 的软件包，尤其是 `kmod-*`。
+如需自定义文件，可自行通过 `FILES=/absolute/path/to/files` 指定目录。使用 `PACKAGES="luci luci-app-homeproxy sing-box"` 等参数从本地仓库选装插件，软件包须在该目标的兼容集合内。它生成 `sysupgrade.img.gz`，不直接生成 burn 包。不要混用官方 OpenWrt、其他 ImmortalWrt 版本或不同内核 ABI 的软件包，尤其是 `kmod-*`。
 
 SDK 常规用法：
 
