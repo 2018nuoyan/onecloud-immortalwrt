@@ -1,10 +1,10 @@
-# OneCloud OpenWrt
+# OneCloud ImmortalWrt
 
-玩客云（Thunder OneCloud，Amlogic S805 / meson8b，32 位）的 OpenWrt 固件。
+玩客云（Thunder OneCloud，Amlogic S805 / meson8b，32 位）的 ImmortalWrt 固件。
 
-源码是官方 [openwrt/openwrt](https://github.com/openwrt/openwrt) 最新的 `v25.12.x` 正式发布版（不是分支头）。官方源码树里没有 S805 的 target，设备支持（设备树、6.12 内核补丁、镜像打包）由本仓库的 `target/linux/amlogic` 提供。
+源码固定为 [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) 的 `v25.12.2` 正式发布版（提交 `4fc16f2985a358bd43bb522e43f05395fcbd6ed5`），保留该标签固定的 feeds。设备支持（设备树、6.12 内核补丁、镜像打包）由本仓库的 `target/linux/amlogic` 提供。
 
-每月 1 号自动云编译一次，产物发在 [Releases](../../releases)。
+每月 1 号自动云编译一次，产物发在 [Releases](../../releases)。构建同时生成匹配此固件的独立 ImageBuilder 和 SDK。
 
 ## 下载哪个文件
 
@@ -33,7 +33,7 @@
 就是传统的 OpenWrt 网页升级。LuCI → 系统 → 备份/升级 → 刷写新的固件，选 `*-sysupgrade.img.gz`。或者命令行：
 
 ```bash
-sysupgrade -v /tmp/openwrt-*-sysupgrade.img.gz
+sysupgrade -v /tmp/immortalwrt-*-sysupgrade.img.gz
 ```
 
 升级只写引导分区和根分区，**不碰 u-boot**，所以升级失败也不会变砖，大不了再线刷一次。勾选「保留配置」会把 `/etc` 备份带到新系统里。
@@ -44,7 +44,7 @@ sysupgrade -v /tmp/openwrt-*-sysupgrade.img.gz
 
 ```bash
 # 电脑上：把镜像写进 U 盘
-gzip -dc openwrt-*-sysupgrade.img.gz | sudo dd of=/dev/sdX bs=4M status=progress
+gzip -dc immortalwrt-*-sysupgrade.img.gz | sudo dd of=/dev/sdX bs=4M status=progress
 
 # 插上 U 盘开机，进系统后：
 onecloud-install-emmc
@@ -61,14 +61,14 @@ onecloud-install-emmc
 | 主机名 | `OneCloud` |
 | 时区 | `Asia/Tokyo`（JST-9，不是上海） |
 | Reset 键 | 开机过程中按一下进 failsafe；开机后按住约 5 秒恢复出厂 |
-| Web 界面 | 官方 LuCI，简体中文 |
+| Web 界面 | ImmortalWrt LuCI，简体中文 |
 | 防火墙 | firewall4 / nftables |
 
 玩客云只有一个 100M 网口。想当主路由用的话，WAN 需要插 USB 网卡或者手机 USB 共享网络，固件里已经预置了 `eth1` 的 DHCP WAN 口，插上就能用；不插也不影响 LAN。
 
 ## 包含
 
-- 官方 LuCI + 简体中文
+- ImmortalWrt LuCI + 简体中文
 - Docker + Docker Compose + LuCI 管理界面
 - HomeProxy（sing-box）
 - zram 压缩交换分区、BBR、irqbalance、多核软中断分流
@@ -87,21 +87,45 @@ Docker 数据默认放在根分区，升级时会被覆盖。经常用 Docker �
 
 ## 自己编译
 
-Actions → **Build OpenWrt OneCloud** → Run workflow，可以改 LAN IP。
+Actions → **Build ImmortalWrt OneCloud** → Run workflow，可以改 LAN IP。
 
-本地编译（Linux x86_64，空闲磁盘 30G 以上）：
+本地编译（Linux x86_64，建议空闲磁盘 80G 以上，需安装 OpenWrt 编译依赖）：
 
 ```bash
-git clone --depth=1 -b openwrt-25.12 https://github.com/openwrt/openwrt.git
-git clone https://github.com/neomikanagi/onecloud-openwrt.git custom
-cp -a custom/target custom/files openwrt/
-cd openwrt
-./scripts/feeds update -a && ./scripts/feeds install -a
-cp ../custom/config/onecloud.config .config
-../custom/scripts/diy-part2.sh 10.10.10.1 true
+git clone https://github.com/2018nuoyan/onecloud-immortalwrt.git
+cd onecloud-immortalwrt
+set -o pipefail
+JOBS=8 bash scripts/build-local.sh 10.10.10.1 true 2>&1 | tee build.log
+```
+
+已部署的开发服务器项目目录为 `/home/nuoyan/onecloud-openwrt`，可直接在该目录运行构建脚本。
+
+脚本在项目的 `openwrt/` 目录克隆固定版本，依次检查配置、准备内核、下载源码并编译，不使用其他现有源码目录。已有 `openwrt/` 必须匹配固定提交。`build.status` 记录退出阶段和退出码；产物位于 `openwrt/bin/targets/amlogic/meson8b/`。本地脚本不执行额外的 USB Burning Tool 镜像打包，该步骤仍由 Actions 执行。
+
+### ImageBuilder 与 SDK
+
+- `immortalwrt-imagebuilder-*.tar.zst`：重组固件，包含此次编译的软件包，不编译新包或内核。
+- `immortalwrt-sdk-*.tar.zst`：编译匹配此目标的软件包，不是完整固件源码。
+- `onecloud-files.tar.gz`：Actions 发布的设备默认配置文件。
+
+在 Linux x86_64 上解压 ImageBuilder 和 `onecloud-files.tar.gz`，进入 ImageBuilder 目录：
+
+```bash
+make info
+make image PROFILE=thunder-onecloud \
+  PACKAGES="luci luci-ssl luci-app-homeproxy sing-box" \
+  FILES=/absolute/path/to/files
+```
+
+ImageBuilder 默认包集合不等于本项目完整固件，需在 `PACKAGES` 中列出所需附加软件包；参考发布的 `onecloud.config`。它生成 `sysupgrade.img.gz`，不直接生成 burn 包。不要混用官方 OpenWrt、其他 ImmortalWrt 版本或不同内核 ABI 的软件包，尤其是 `kmod-*`。
+
+SDK 常规用法：
+
+```bash
+./scripts/feeds update -a
 ./scripts/feeds install -a
 make defconfig
-make -j"$(nproc)"
+make package/<package-name>/compile -j8 V=s
 ```
 
 ## 致谢

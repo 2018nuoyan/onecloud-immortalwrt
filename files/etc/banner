@@ -4,6 +4,7 @@
   / /_/ / /_/ /  __/ / / / |/ |/ / /  / /_      / /___/ ___ |/ /_/ /
   \____/ .___/\___/_/ /_/|__/|__/_/   \__/     /_____/_/  |_/_____/
       /_/   Thunder OneCloud  ·  Amlogic S805  ·  meson8b
+             ImmortalWrt 25.12.2
  ---------------------------------------------------------------------
   Update : LuCI -> System -> Backup / Flash Firmware -> sysupgrade
   To eMMC: onecloud-install-emmc   (when booted from USB)

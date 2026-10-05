@@ -6,3 +6,6 @@ openwrt/
 *.bin
 *.swp
 .ccache/
+*.log
+build.pid
+build.status

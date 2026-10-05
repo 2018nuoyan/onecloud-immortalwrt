@@ -1,4 +1,4 @@
-name: Build OpenWrt OneCloud
+name: Build ImmortalWrt OneCloud
 
 on:
   schedule:
@@ -21,9 +21,9 @@ permissions:
 
 env:
   TZ: Etc/UTC
-  REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: openwrt-25.12
-  REPO_SERIES: v25.12
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_TAG: v25.12.2
+  REPO_COMMIT: 4fc16f2985a358bd43bb522e43f05395fcbd6ed5
   LAN_IP: ${{ inputs.lan_ip || '10.10.10.1' }}
   USE_CCACHE: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.use_ccache && 'true' || 'false') }}
   AMLIMG_VERSION: v0.3.1
@@ -61,21 +61,16 @@ jobs:
           sudo chown "$USER:$USER" /workdir
           df -hT
 
-      - name: Clone the newest OpenWrt ${{ env.REPO_SERIES }} release tag
+      - name: Clone ImmortalWrt ${{ env.REPO_TAG }}
         working-directory: /workdir
         run: |
-          # Build from a tagged point release, not the branch head. The head of
-          # a stable branch carries commits that have not been through a
-          # release, which is the wrong trade for an unattended monthly build.
-          tag=$(git ls-remote --tags --refs "${REPO_URL}" "${REPO_SERIES}.*" \
-                | awk -F/ '{print $NF}' | sort -V | tail -1)
-          [ -n "$tag" ] || { echo "::error::no ${REPO_SERIES}.* tag found"; exit 1; }
-          echo "building OpenWrt $tag"
-          git clone --depth=1 --single-branch --branch "$tag" "${REPO_URL}" openwrt
+          git clone --depth=1 --single-branch --branch "${REPO_TAG}" "${REPO_URL}" openwrt
+          [ "$(git -C openwrt rev-parse HEAD)" = "${REPO_COMMIT}" ] || {
+            echo "::error::release tag does not match the expected commit"; exit 1; }
           ln -sfn /workdir/openwrt "${GITHUB_WORKSPACE}/openwrt"
           echo "OPENWRT_SHA=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_ENV"
-          echo "OPENWRT_VERSION=$tag" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=v$(date +%Y.%m.%d)" >> "$GITHUB_ENV"
+          echo "OPENWRT_VERSION=${REPO_TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=immortalwrt-25.12.2-$(date +%Y.%m.%d)" >> "$GITHUB_ENV"
 
       - name: Cache ccache and downloads
         uses: actions/cache@v4
@@ -83,9 +78,9 @@ jobs:
           path: |
             /workdir/openwrt/.ccache
             /workdir/openwrt/dl
-          key: onecloud-v2-${{ env.REPO_BRANCH }}-${{ hashFiles('config/onecloud.config') }}
+          key: onecloud-immortalwrt-${{ env.REPO_TAG }}-${{ hashFiles('config/onecloud.config') }}
           restore-keys: |
-            onecloud-v2-${{ env.REPO_BRANCH }}-
+            onecloud-immortalwrt-${{ env.REPO_TAG }}-
 
       - name: Inject target and custom files
         run: |
@@ -118,18 +113,7 @@ jobs:
       - name: Verify every requested package survived defconfig
         run: |
           cd openwrt
-          missing=0
-          while read -r sym; do
-            grep -qx "$sym" .config || { echo "MISSING: $sym"; missing=1; }
-          done < <(grep -E '^CONFIG_PACKAGE_[A-Za-z0-9._+-]+=y$' "${GITHUB_WORKSPACE}/config/onecloud.config")
-          grep -qx 'CONFIG_TARGET_amlogic_meson8b_DEVICE_thunder-onecloud=y' .config || {
-            echo "MISSING: target device"; missing=1; }
-          grep -qx 'CONFIG_KERNEL_ZRAM_BACKEND_LZ4=y' .config || {
-            echo "MISSING: CONFIG_KERNEL_ZRAM_BACKEND_LZ4"; missing=1; }
-          grep -qx 'CONFIG_KERNEL_ZRAM_DEF_COMP_LZ4=y' .config || {
-            echo "MISSING: CONFIG_KERNEL_ZRAM_DEF_COMP_LZ4"; missing=1; }
-          [ "$missing" = 0 ] || { echo "::error::defconfig dropped packages, aborting before a 3 hour build"; exit 1; }
-          echo "all requested packages present"
+          "${GITHUB_WORKSPACE}/scripts/verify-config.sh"
 
       - name: Download sources
         run: |
@@ -186,13 +170,20 @@ jobs:
           mkdir -p /tmp/fw
           cd openwrt/bin/targets/amlogic/meson8b
           cp ./*-sysupgrade.img.gz ./*-emmc.burn.img.xz /tmp/fw/
+          cp ./*-imagebuilder-*.tar.zst ./*-sdk-*.tar.zst /tmp/fw/
           cp ../../../../.config /tmp/fw/build.config
+          cp ../../../../feeds.conf.default /tmp/fw/feeds.conf.default
+          cp "${GITHUB_WORKSPACE}/config/onecloud.config" /tmp/fw/onecloud.config
+          tar -czf /tmp/fw/onecloud-files.tar.gz -C "${GITHUB_WORKSPACE}" files
+          printf 'source=%s\ntag=%s\ncommit=%s\n' \
+            "${REPO_URL}" "${OPENWRT_VERSION}" \
+            "$(git -C ../../../.. rev-parse HEAD)" > /tmp/fw/source-version.txt
           cd /tmp/fw && sha256sum ./* > sha256sums && ls -lh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onecloud-openwrt-${{ env.RELEASE_TAG }}
+          name: onecloud-immortalwrt-${{ env.RELEASE_TAG }}
           path: /tmp/fw
           if-no-files-found: error
 
@@ -200,11 +191,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: OneCloud OpenWrt ${{ env.RELEASE_TAG }}
+          name: OneCloud ImmortalWrt ${{ env.RELEASE_TAG }}
           files: /tmp/fw/*
           make_latest: true
           body: |
-            OpenWrt `${{ env.OPENWRT_VERSION }}` (`${{ env.OPENWRT_SHA }}`) for Thunder OneCloud (Amlogic S805).
+            ImmortalWrt `${{ env.OPENWRT_VERSION }}` (`${{ env.OPENWRT_SHA }}`) for Thunder OneCloud (Amlogic S805).
+
+            Matching standalone ImageBuilder and SDK are included. Extract `onecloud-files.tar.gz` and pass its `files/` directory to ImageBuilder with `FILES=` to retain device defaults.
 
             | | |
             | --- | --- |

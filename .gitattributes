@@ -1,0 +1,2 @@
+# Shell scripts and build rules must remain usable on Linux after checkout.
+* text=auto eol=lf

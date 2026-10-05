@@ -1,5 +1,5 @@
 #!/bin/bash
 # Runs inside the OpenWrt tree before `feeds update`.
-# Official feeds only - nothing to do.
+# Keep the feeds pinned by the ImmortalWrt release tag.
 set -e
-echo "diy-part1: using stock feeds.conf.default"
+echo "diy-part1: using release-pinned ImmortalWrt feeds.conf.default"
