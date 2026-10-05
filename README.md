@@ -92,9 +92,11 @@ Docker 数据默认放在根分区，升级时会被覆盖。经常用 Docker �
 | 工作流文件 | 名称 | 产物 |
 | --- | --- | --- |
 | `.github/workflows/build.yml` | 构建玩客云 ImmortalWrt 固件 | sysupgrade 升级镜像、burn 线刷镜像 |
-| `.github/workflows/build-tools.yml` | 构建玩客云 ImageBuilder 和 ImmortalWrt SDK | 独立 ImageBuilder、SDK、设备默认配置 |
+| `.github/workflows/build-tools.yml` | 构建玩客云 ImageBuilder 和 ImmortalWrt SDK | 仅独立 ImageBuilder 和 SDK 两个压缩包 |
 
-固件流程禁用 `CONFIG_IB` 和 `CONFIG_SDK`；工具流程启用两者并包含本地软件包仓库。工具流程仍需编译工具链、内核和软件包，但只打包工具，不生成 sysupgrade 或 burn 镜像。两条流程使用相同源码、feeds 和软件包配置；匹配固件时请使用同一项目提交和相同的输入参数。
+固件流程禁用 `CONFIG_IB` 和 `CONFIG_SDK`。工具流程使用精简的 `config/onecloud-tools.config`，仅保留目标默认软件包、必要设备支持和工具包选项，不注入 `files/`，不执行定制脚本，不修改网络和密码。独立 ImageBuilder 包含本次编译的目标默认软件包。工具流程仍需编译工具链、内核和默认软件包，但不生成 sysupgrade 或 burn 镜像。
+
+两条流程使用相同上游版本和 feeds，但软件包及内核配置不同，内核 ABI 可能不一致；不要把精简工具流程的内核模块直接安装到完整定制固件中。
 
 工具 Release 使用 `tools-` 标签前缀，不会覆盖最新固件或被固件清理步骤删除。本地构建脚本仍默认生成固件、ImageBuilder 和 SDK。
 
@@ -113,20 +115,17 @@ JOBS=8 bash scripts/build-local.sh 10.10.10.1 true 2>&1 | tee build.log
 
 ### ImageBuilder 与 SDK
 
-- `immortalwrt-imagebuilder-*.tar.zst`：重组固件，包含此次编译的软件包，不编译新包或内核。
-- `immortalwrt-sdk-*.tar.zst`：编译匹配此目标的软件包，不是完整固件源码。
-- `onecloud-files.tar.gz`：Actions 发布的设备默认配置文件。
+- `immortalwrt-imagebuilder-*.tar.zst`：重组固件，包含目标默认软件包，不编译新包或内核。
+- `immortalwrt-sdk-*.tar.zst`：编译此目标的软件包，不是完整固件源码。
 
-在 Linux x86_64 上解压 ImageBuilder 和 `onecloud-files.tar.gz`，进入 ImageBuilder 目录：
+在 Linux x86_64 上解压 ImageBuilder，进入其目录：
 
 ```bash
 make info
-make image PROFILE=thunder-onecloud \
-  PACKAGES="luci luci-ssl luci-app-homeproxy sing-box" \
-  FILES=/absolute/path/to/files
+make image PROFILE=thunder-onecloud
 ```
 
-ImageBuilder 默认包集合不等于本项目完整固件，需在 `PACKAGES` 中列出所需附加软件包；参考发布的 `onecloud.config`。它生成 `sysupgrade.img.gz`，不直接生成 burn 包。不要混用官方 OpenWrt、其他 ImmortalWrt 版本或不同内核 ABI 的软件包，尤其是 `kmod-*`。
+如需自定义文件，可自行通过 `FILES=/absolute/path/to/files` 指定目录。精简 ImageBuilder 不包含完整定制固件的 Docker、HomeProxy 等附加包；需要其他包时应先编译并提供兼容的软件包仓库，再使用 `PACKAGES=` 选择。它生成 `sysupgrade.img.gz`，不直接生成 burn 包。不要混用官方 OpenWrt、其他 ImmortalWrt 版本或不同内核 ABI 的软件包，尤其是 `kmod-*`。
 
 SDK 常规用法：
 
