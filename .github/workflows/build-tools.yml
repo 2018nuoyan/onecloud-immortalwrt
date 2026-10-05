@@ -107,6 +107,8 @@ jobs:
           build_stage() {
             make -j"$(nproc)" "$@" || make -j1 V=s "$@"
           }
+          # 上游 liblzo 的并行依赖未完整覆盖 ccache，先安装编译启动器。
+          build_stage tools/ccache/compile
           build_stage tools/install
           build_stage toolchain/install
           build_stage target/compile

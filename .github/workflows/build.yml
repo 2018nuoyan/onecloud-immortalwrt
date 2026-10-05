@@ -131,6 +131,10 @@ jobs:
         id: compile
         run: |
           cd openwrt
+          # 避免 liblzo 在 ccache 编译完成前启动而导致首次并行构建失败。
+          if grep -qx 'CONFIG_CCACHE=y' .config; then
+            make -j"$(nproc)" tools/ccache/compile || make -j1 V=s tools/ccache/compile
+          fi
           make -j"$(nproc)" || make -j1 V=s
           echo "status=success" >> "$GITHUB_OUTPUT"
           df -hT
